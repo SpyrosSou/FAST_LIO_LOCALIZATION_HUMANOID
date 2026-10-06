@@ -1,18 +1,18 @@
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp/wait_for_message.hpp>
 #include <nav_msgs/msg/odometry.hpp>
-#include <tf2_ros/transform_broadcaster.hpp>
-#include <tf2_ros/transform_listener.hpp>
-#include <tf2_ros/buffer.hpp>
-#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
+#include <tf2_ros/transform_broadcaster.h>
+#include <tf2_ros/transform_listener.h>
+#include <tf2_ros/buffer.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.h>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
-#include <tf2_ros/static_transform_broadcaster.hpp>
+#include <tf2_ros/static_transform_broadcaster.h>
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <std_msgs/msg/float32.hpp>
 
-#include <tf2_eigen/tf2_eigen.hpp>
+#include <tf2_eigen/tf2_eigen.h>
 #include <queue>
 #include <cmath>
 // #include <pcl/common/transforms.h>
@@ -366,6 +366,22 @@ GloabalLocalization::GloabalLocalization() : Node("global_loc_node"),
         std::cout << i << " ";
     }
     std::cout << std::endl;
+    // initialpose_ defaults to an EMPTY vector (declare_parameter's default
+    // above) if the "initialpose" param never loads for any reason (e.g. a
+    // node-name mismatch between the params-file's top-level YAML key and
+    // this node's actual name -- ros2 silently skips non-matching
+    // node-scoped params rather than erroring). Indexing [3]..[5] into an
+    // empty vector is undefined behavior and segfaults immediately; fall
+    // back to identity instead of crashing on a config/wiring mistake.
+    if (initialpose_.size() < 6)
+    {
+        RCLCPP_ERROR(this->get_logger(),
+                     "'initialpose' parameter has %zu elements (need 6: x,y,z,roll,pitch,yaw) -- "
+                     "defaulting to identity. Check that this node's name matches the params-file's "
+                     "top-level YAML key.",
+                     initialpose_.size());
+        initialpose_.assign(6, 0.0);
+    }
     mat_initialpose_.block<3, 3>(0, 0) = Euler2Matrix3d(Eigen::Vector3d(initialpose_[3], initialpose_[4], initialpose_[5]));
     mat_initialpose_.block<3, 1>(0, 3) = Eigen::Vector3d(initialpose_[0], initialpose_[1], initialpose_[2]);
 
@@ -443,7 +459,23 @@ bool GloabalLocalization::GetTfTransformToMatrix(std::string frame_id, std::stri
     }
     catch (tf2::TransformException &e)
     {
+        // NOTE: this used to return here without ever assigning `matrix`,
+        // leaving it at whatever unspecified value it had (observed as all
+        // zeros). Both callers of this function (imu_link<->base_link,
+        // base_link<->motion_link) treat the result as a mounting-offset
+        // transform that is identity in every known deployment of this
+        // package (the reference launch publishes both as literal identity
+        // static transforms) -- but publishing those same static frames in
+        // this sim would make "base_link" a child of two different parents
+        // (Isaac Sim's own dynamic odom->base_link is the other), which is
+        // exactly the kind of TF conflict that silently corrupts lookups.
+        // Defaulting to identity on failure gets the same correct behavior
+        // without introducing that conflict. mat_imulink2baselink_.inverse()
+        // (called downstream on every odometry callback) of an unset/zero
+        // matrix is what was corrupting mat_baselink2odom_/mat_baselink2map_
+        // and ultimately crashing ICP registration on an empty-cropped map.
         RCLCPP_ERROR(this->get_logger(), "[GetTransformMatrix]: %s", e.what());
+        matrix = Eigen::Matrix4d::Identity();
         return false;
     }
 
@@ -707,6 +739,23 @@ void GloabalLocalization::LocalizationInitialize()
             }
             open3d::utility::LogInfo("source size: {}, has normal: {}", source->points_.size(), source->HasNormals() ? "true" : "false");
 
+            // Point-to-plane ICP (inside RegistrationMultiScaleIcp) throws a
+            // hard std::runtime_error and takes the whole node down if either
+            // cloud is empty -- this happens routinely before a correct
+            // initial pose has been set (the crop box is centered on the
+            // current, possibly-wrong, pose estimate). Skip this iteration
+            // and retry on the next scan instead of crashing.
+            if (target->points_.empty() || source->points_.empty())
+            {
+                lock_mat_odom2map_.unlock();
+                RCLCPP_WARN(this->get_logger(),
+                            "empty crop (target=%zu source=%zu) -- waiting for a better pose estimate "
+                            "(set one via RViz '2D Pose Estimate' if this persists)",
+                            target->points_.size(), source->points_.size());
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                continue;
+            }
+
             source->Transform(reg_matrix);
             *pcd_scan2map = *source;
 
@@ -943,6 +992,18 @@ void GloabalLocalization::Localization()
                 source = source->RandomDownSample(double(maxpoints_source_) / source->points_.size());
             }
             open3d::utility::LogInfo("after prerpocess: {}", source->points_.size());
+
+            // Same empty-crop guard as LocalizationInitialize() -- see the
+            // comment there. RegistrationIcp crashes the whole node on an
+            // empty target/source instead of failing gracefully.
+            if (target->points_.empty() || source->points_.empty())
+            {
+                lock_mat_odom2map_.unlock();
+                RCLCPP_WARN(this->get_logger(),
+                            "empty crop (target=%zu source=%zu) -- skipping this update",
+                            target->points_.size(), source->points_.size());
+                continue;
+            }
 
             auto reg_result2 = pcd_tools::RegistrationIcp(source, target, voxelsize_fine_ * 2, reg_matrix, 1);
             reg_matrix = reg_result2.transformation_ * reg_matrix;

@@ -7,7 +7,7 @@ if(NOT CMAKE_CXX_STANDARD)
 endif()
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-        add_compile_options(-Wall -Wextra -Wpedantic -O3)
+        add_compile_options(-Wall -Wextra -Wpedantic -O3 -g)
 endif()
 
 set(CMAKE_BUILD_TYPE "Release")
@@ -25,7 +25,7 @@ find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(tf2_eigen REQUIRED)
 find_package(tf2_sensor_msgs REQUIRED)
-find_package(pcl_ros REQUIRED)
+# pcl_ros dropped for Foxy port: not used in source (only pcl/common/transforms.h via find_package(PCL))
 find_package(pcl_conversions REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(image_transport REQUIRED)
@@ -38,10 +38,8 @@ find_package(PCL REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(Boost REQUIRED COMPONENTS filesystem system)
 
-# Set Open3D path - modify this to your installation path
-set(Open3D_DIR "/home/sax/open3d141/lib/cmake/Open3D")
-
-# set(Open3D_DIR "/home/unitree/open3d141_arm/open3d141/lib/cmake/Open3D")
+# Set Open3D path - source-built 0.14.1 (libstdc++ new ABI), isolated install prefix
+set(Open3D_DIR "$ENV{HOME}/open3d_install/lib/cmake/Open3D")
 find_package(Open3D REQUIRED)
 
 # Fix Open3D libraries - remove problematic .so files
@@ -137,7 +135,6 @@ ament_target_dependencies(global_localization_node
         tf2_ros
         tf2_geometry_msgs
         tf2_eigen
-        pcl_ros
         pcl_conversions
 )
 

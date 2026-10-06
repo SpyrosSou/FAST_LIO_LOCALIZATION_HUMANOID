@@ -7,7 +7,7 @@ endif()
 
 ADD_COMPILE_OPTIONS(-std=c++17)
 ADD_COMPILE_OPTIONS(-std=c++17)
-set(CMAKE_CXX_FLAGS "-std=c++17 -O3")
+set(CMAKE_CXX_FLAGS "-std=c++17 -O3 -g")
 
 add_definitions(-DROOT_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/\")
 
@@ -60,7 +60,12 @@ find_package(visualization_msgs REQUIRED)
 find_package(pcl_ros REQUIRED)
 find_package(pcl_conversions REQUIRED)
 
-find_package(livox_ros_driver2 REQUIRED)
+option(FAST_LIO_WITH_LIVOX "Enable Livox driver integration (livox_ros_driver2)" OFF)
+if(FAST_LIO_WITH_LIVOX)
+  find_package(livox_ros_driver2 REQUIRED)
+else()
+  find_package(livox_ros_driver2 QUIET)
+endif()
 
 # find_package(livox_ros2_driver REQUIRED)
 # find_package(livox_interfaces REQUIRED)
@@ -77,12 +82,15 @@ set(dependencies
   visualization_msgs
   pcl_ros
   pcl_conversions
-
-  livox_ros_driver2
-
-  # livox_ros2_driver
-  # livox_interfaces
 )
+
+if(livox_ros_driver2_FOUND)
+  list(APPEND dependencies livox_ros_driver2)
+elseif(FAST_LIO_WITH_LIVOX)
+  message(FATAL_ERROR "FAST_LIO_WITH_LIVOX=ON but livox_ros_driver2 was not found")
+else()
+  message(STATUS "livox_ros_driver2 not found; building fast_lio without Livox integration")
+endif()
 
 # Thirdparty libraries
 find_package(Eigen3 REQUIRED)
@@ -108,6 +116,10 @@ target_include_directories(fastlio_mapping PUBLIC
 )
 target_link_libraries(fastlio_mapping ${PCL_LIBRARIES} ${PYTHON_LIBRARIES} Eigen3::Eigen)
 target_include_directories(fastlio_mapping PRIVATE ${PYTHON_INCLUDE_DIRS})
+
+if(livox_ros_driver2_FOUND)
+  target_compile_definitions(fastlio_mapping PRIVATE FAST_LIO_HAS_LIVOX)
+endif()
 
 list(APPEND EOL_LIST "foxy" "galactic" "eloquent" "dashing" "crystal")
 

@@ -59,7 +59,9 @@
 #include <tf2_ros/transform_broadcaster.h>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <geometry_msgs/msg/vector3.hpp>
+#ifdef FAST_LIO_HAS_LIVOX
 #include <livox_ros_driver2/msg/custom_msg.hpp>
+#endif
 // #include <livox_interfaces/msg/custom_msg.hpp>
 #include "preprocess.h"
 #include <ikd-Tree/ikd_Tree.h>
@@ -318,6 +320,7 @@ void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::UniquePtr msg)
 
 double timediff_lidar_wrt_imu = 0.0;
 bool timediff_set_flg = false;
+#ifdef FAST_LIO_HAS_LIVOX
 void livox_pcl_cbk(const livox_ros_driver2::msg::CustomMsg::UniquePtr msg)
 // void livox_pcl_cbk(const livox_interfaces::msg::CustomMsg::UniquePtr msg)
 {
@@ -357,6 +360,7 @@ void livox_pcl_cbk(const livox_ros_driver2::msg::CustomMsg::UniquePtr msg)
     mtx_buffer.unlock();
     sig_buffer.notify_all();
 }
+#endif
 
 void imu_cbk(const sensor_msgs::msg::Imu::UniquePtr msg_in)
 {
@@ -528,7 +532,12 @@ void publish_frame_world(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::Share
     /**************** save map ****************/
     /* 1. make sure you have enough memories
     /* 2. noted that pcd save will influence the real-time performences **/
-    /*
+    // NOTE: this whole block used to be wrapped in a /* ... */ comment,
+    // meaning pcl_wait_save was NEVER populated during normal operation --
+    // the shutdown-time save block (main(), further down) checks
+    // `pcl_wait_save->size() > 0` before writing, so with this disabled
+    // nothing was ever saved regardless of map_file_path or pcd_save_en.
+    // Uncommented so mapping sessions actually accumulate points to save.
     if (pcd_save_en)
     {
         int size = feats_undistort->points.size();
@@ -555,7 +564,6 @@ void publish_frame_world(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::Share
             scan_wait_num = 0;
         }
     }
-    */
 }
 
 void publish_frame_body(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudFull_body)
@@ -937,8 +945,13 @@ public:
         /*** ROS subscribe initialization ***/
         if (p_pre->lidar_type == AVIA)
         {
+#ifdef FAST_LIO_HAS_LIVOX
             sub_pcl_livox_ = this->create_subscription<livox_ros_driver2::msg::CustomMsg>(lid_topic, 20, livox_pcl_cbk);
             // sub_pcl_livox_ = this->create_subscription<livox_interfaces::msg::CustomMsg>(lid_topic, 20, livox_pcl_cbk);
+#else
+            RCLCPP_ERROR(this->get_logger(), "lidar_type=AVIA but FAST_LIO was built without livox_ros_driver2; falling back to PointCloud2 subscription");
+            sub_pcl_pc_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(lid_topic, rclcpp::SensorDataQoS(), standard_pcl_cbk);
+#endif
         }
         else
         {
@@ -969,7 +982,14 @@ public:
     {
         fout_out.close();
         fout_pre.close();
-        fclose(fp);
+        // fp is opened via fopen(root_dir + "/Log/pos_log.txt") with no
+        // return-value check; if that Log/ directory doesn't exist (true on
+        // a fresh checkout -- this workspace never ships one), fopen()
+        // returns NULL and this unconditional fclose(fp) segfaults on every
+        // clean shutdown (confirmed via gdb: crash in _IO_new_fclose(fp=0x0)
+        // called from here). fclose(NULL) is undefined behavior in glibc.
+        if (fp)
+            fclose(fp);
     }
 
 private:
@@ -1000,7 +1020,8 @@ private:
 
             if (feats_undistort->empty() || (feats_undistort == NULL))
             {
-                RCLCPP_WARN(this->get_logger(), "No point, skip this scan!\n");
+                RCLCPP_WARN(this->get_logger(), "No point, skip this scan! [diag] lidar_pts=%zu imu_pts=%zu\n",
+                            Measures.lidar ? Measures.lidar->points.size() : 0, Measures.imu.size());
                 return;
             }
 
@@ -1037,7 +1058,9 @@ private:
             /*** ICP and iterated Kalman filter update ***/
             if (feats_down_size < 5)
             {
-                RCLCPP_WARN(this->get_logger(), "No point, skip this scan!\n");
+                RCLCPP_WARN(this->get_logger(), "No point, skip this scan! [diag] "
+                            "undistort_pts=%zu down_pts=%d\n",
+                            feats_undistort->points.size(), feats_down_size);
                 return;
             }
 
@@ -1078,6 +1101,7 @@ private:
             double t_update_end = omp_get_wtime();
 
             /******* Publish odometry *******/
+            RCLCPP_INFO_ONCE(this->get_logger(), "[diag] First successful scan reached publish step (down_pts=%d)", feats_down_size);
             publish_odometry(pubOdomAftMapped_, tf_broadcaster_);
 
             /*** add the feature points to map kdtree ***/
@@ -1159,8 +1183,10 @@ private:
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pubPath_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sub_imu_;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_pcl_pc_;
+#ifdef FAST_LIO_HAS_LIVOX
     rclcpp::Subscription<livox_ros_driver2::msg::CustomMsg>::SharedPtr sub_pcl_livox_;
     // rclcpp::Subscription<livox_interfaces::msg::CustomMsg>::SharedPtr sub_pcl_livox_;
+#endif
 
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
     rclcpp::TimerBase::SharedPtr timer_;
@@ -1190,13 +1216,19 @@ int main(int argc, char **argv)
     /**************** save map ****************/
     /* 1. make sure you have enough memories
     /* 2. pcd save will largely influence the real-time performences **/
+    // NOTE: this used to hardcode the save path to ROOT_DIR (this package's
+    // own source directory) + "PCD/scans.pcd", silently ignoring the
+    // map_file_path parameter entirely -- on a machine/workspace where
+    // <source_dir>/PCD/ doesn't exist (e.g. a fresh checkout), this write
+    // fails with nothing saved and nothing surfaced to the caller. Save to
+    // map_file_path (the same parameter map_save_callback and the mid-run
+    // save-map service already use) instead, so Ctrl-C and the service call
+    // agree on where the map goes.
     if (pcl_wait_save->size() > 0 && pcd_save_en)
     {
-        string file_name = string("scans.pcd");
-        string all_points_dir(string(string(ROOT_DIR) + "PCD/") + file_name);
         pcl::PCDWriter pcd_writer;
-        cout << "current scan saved to /PCD/" << file_name << endl;
-        pcd_writer.writeBinary(all_points_dir, *pcl_wait_save);
+        cout << "current scan saved to " << map_file_path << endl;
+        pcd_writer.writeBinary(map_file_path, *pcl_wait_save);
     }
 
     if (runtime_pos_log)
