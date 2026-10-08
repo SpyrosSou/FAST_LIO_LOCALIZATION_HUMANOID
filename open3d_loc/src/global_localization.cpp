@@ -1100,8 +1100,17 @@ void GloabalLocalization::CallbackInitialPose(const geometry_msgs::msg::PoseWith
         rotation_q.z() = initialpose->pose.pose.orientation.z;
         mat_initialpose_.block<3, 3>(0, 0) = rotation_q.matrix();
         mat_initialpose_.block<3, 1>(0, 3) = Eigen::Vector3d(initialpose->pose.pose.position.x, initialpose->pose.pose.position.y, initialpose->pose.pose.position.z);
+        // /initialpose is the ROBOT's pose in the map (RViz "2D Pose Estimate", amcl_initial_pose), so
+        // map->odom = initialpose * (odom->base)^-1. Upstream took it as map->odom itself, which is only right
+        // while the robot is still at the odom origin (it has not moved since FAST-LIO started).
+        // Only the planar part (x, y, z, yaw) of odom->base: the 2D pose has no roll/pitch, so the body's tilt must
+        // not end up in map->odom.
+        Eigen::Matrix4d base2odom_planar = Eigen::Matrix4d::Identity();
+        const double base_yaw = std::atan2(mat_baselink2odom_(1, 0), mat_baselink2odom_(0, 0));
+        base2odom_planar.block<3, 3>(0, 0) = Eigen::AngleAxisd(base_yaw, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+        base2odom_planar.block<3, 1>(0, 3) = mat_baselink2odom_.block<3, 1>(0, 3);
         lock_mat_odom2map_.lock();
-        mat_odom2map_ = mat_initialpose_;
+        mat_odom2map_ = mat_initialpose_ * base2odom_planar.inverse();
         lock_mat_odom2map_.unlock();
         std::cout << "\n\n*** update mat_odom2map_" << std::endl;
     }

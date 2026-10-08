@@ -11,7 +11,8 @@
 > **open3d_loc**
 > - `publish_tf` (default `true`): `false` = no map→odom / map→motion_link TF, for setups where another node owns
 >   map→odom.
-> - `odom2map_smoothing` (default `0.0` = off, as upstream): the published map→odom glides toward each new
+> - `/initialpose` is the robot's pose in the map (RViz "2D Pose Estimate"): map → odom = initialpose · (odom → base, planar)⁻¹ — upstream used it as map → odom itself, right only while the robot is still at the odom origin.
+- `odom2map_smoothing` (default `0.0` = off, as upstream): the published map→odom glides toward each new
 >   registration result instead of jumping every 1/`loc_frequence` s (0.1 → largest TF step 21 → 5 mm in our tests);
 >   jumps > 1 m (re-localisation) are taken at once.
 > - Robustness: an empty `initialpose` and missing mount frames (`imu_link`, `motion_link`) fall back to identity
