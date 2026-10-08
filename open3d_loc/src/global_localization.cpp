@@ -227,6 +227,12 @@ private:
 
     /// @brief 对odom2map进行kalman滤波
     bool filter_odom2map_ = false;
+    bool publish_tf_ = true;              // false: no map→odom / map→motion_link TF (e.g. another node owns map→odom)
+    double odom2map_smoothing_ = 0.0;     // 0 = off; 0..1: per published TF, move this fraction toward the newest
+                                          // map→odom correction (glide instead of a jump every 1/loc_frequence s)
+    bool smooth_init_ = false;
+    Eigen::Vector3d smooth_t_ = Eigen::Vector3d::Zero();
+    Eigen::Quaterniond smooth_q_ = Eigen::Quaterniond::Identity();
     double kalman_processVar2_ = 0.0;
     double kalman_estimatedMeasVar2_ = 0.0;
 
@@ -317,6 +323,8 @@ GloabalLocalization::GloabalLocalization() : Node("global_loc_node"),
     this->declare_parameter<std::vector<double>>("kf_baselink2map/z", std::vector<double>(2));
 
     this->declare_parameter<bool>("filter_odom2map", false);
+    this->declare_parameter<bool>("publish_tf", true);
+    this->declare_parameter<double>("odom2map_smoothing", 0.0);
     this->declare_parameter<double>("kalman_processVar2", 0.02);
     this->declare_parameter<double>("kalman_estimatedMeasVar2", 0.04);
     // voxelsize
@@ -337,6 +345,9 @@ GloabalLocalization::GloabalLocalization() : Node("global_loc_node"),
     this->get_parameter("kf_baselink2map/y", kf_param_y_);
     this->get_parameter("kf_baselink2map/z", kf_param_z_);
     this->get_parameter("filter_odom2map", filter_odom2map_);
+    this->get_parameter("publish_tf", publish_tf_);
+    this->get_parameter("odom2map_smoothing", odom2map_smoothing_);
+    odom2map_smoothing_ = std::min(1.0, std::max(0.0, odom2map_smoothing_));
     this->get_parameter("kalman_processVar2", kalman_processVar2_);
     this->get_parameter("kalman_estimatedMeasVar2", kalman_estimatedMeasVar2_);
 
@@ -354,6 +365,8 @@ GloabalLocalization::GloabalLocalization() : Node("global_loc_node"),
                 kf_param_z_.size() >= 2 ? kf_param_z_[1] : 0.0,
                 kf_param_z_.size());
     RCLCPP_INFO(this->get_logger(), "  filter_odom2map: %s", filter_odom2map_ ? "true" : "false");
+    RCLCPP_INFO(this->get_logger(), "  publish_tf: %s, odom2map_smoothing: %.2f", publish_tf_ ? "true" : "false",
+                odom2map_smoothing_);
     this->get_parameter("voxelsize_coarse", voxelsize_coarse_);
     this->get_parameter("voxelsize_fine", voxelsize_fine_);
     this->get_parameter("threshold_fitness_init", threshold_fitness_init_);
@@ -474,7 +487,8 @@ bool GloabalLocalization::GetTfTransformToMatrix(std::string frame_id, std::stri
         // (called downstream on every odometry callback) of an unset/zero
         // matrix is what was corrupting mat_baselink2odom_/mat_baselink2map_
         // and ultimately crashing ICP registration on an empty-cropped map.
-        RCLCPP_ERROR(this->get_logger(), "[GetTransformMatrix]: %s", e.what());
+        RCLCPP_WARN(this->get_logger(), "[GetTransformMatrix] no TF %s -> %s: assuming identity (normal in the sim, "
+                    "which has no imu_link / motion_link frames)", frame_id.c_str(), child_frame_id.c_str());
         matrix = Eigen::Matrix4d::Identity();
         return false;
     }
@@ -530,11 +544,31 @@ void GloabalLocalization::CallbackBaselink2Odom(const nav_msgs::msg::Odometry::S
     transform_odom2map.header.frame_id = "map";
     transform_odom2map.child_frame_id = "odom";
     transform_odom2map.header.stamp = baselink2odom->header.stamp;
-    transform_odom2map.transform.translation.x = odom2map.pose.pose.position.x;
-    transform_odom2map.transform.translation.y = odom2map.pose.pose.position.y;
-    transform_odom2map.transform.translation.z = odom2map.pose.pose.position.z;
-    transform_odom2map.transform.rotation = odom2map.pose.pose.orientation;
-    br_odom2map_->sendTransform(transform_odom2map);
+    // Smoothing (odom2map_smoothing > 0): the TF glides toward the newest correction instead of jumping to it.
+    const auto &p = odom2map.pose.pose.position;
+    const auto &o = odom2map.pose.pose.orientation;
+    Eigen::Vector3d t_new(p.x, p.y, p.z);
+    Eigen::Quaterniond q_new(o.w, o.x, o.y, o.z);
+    if (!smooth_init_ || odom2map_smoothing_ <= 0.0 || (t_new - smooth_t_).norm() > 1.0)
+    {   // first value, off, or a big jump (re-localisation): take it as it is
+        smooth_t_ = t_new;
+        smooth_q_ = q_new;
+        smooth_init_ = true;
+    }
+    else
+    {
+        smooth_t_ += odom2map_smoothing_ * (t_new - smooth_t_);
+        smooth_q_ = smooth_q_.slerp(odom2map_smoothing_, q_new).normalized();
+    }
+    transform_odom2map.transform.translation.x = smooth_t_.x();
+    transform_odom2map.transform.translation.y = smooth_t_.y();
+    transform_odom2map.transform.translation.z = smooth_t_.z();
+    transform_odom2map.transform.rotation.w = smooth_q_.w();
+    transform_odom2map.transform.rotation.x = smooth_q_.x();
+    transform_odom2map.transform.rotation.y = smooth_q_.y();
+    transform_odom2map.transform.rotation.z = smooth_q_.z();
+    if (publish_tf_)
+        br_odom2map_->sendTransform(transform_odom2map);
 
     /// 卡尔曼滤波 - 只在定位初始化完成后执行
     if (loc_initialized_)
@@ -611,7 +645,8 @@ void GloabalLocalization::CallbackBaselink2Odom(const nav_msgs::msg::Odometry::S
         transform.transform.translation.y = motionlink2map.pose.pose.position.y;
         transform.transform.translation.z = motionlink2map.pose.pose.position.z;
         transform.transform.rotation = motionlink2map.pose.pose.orientation;
-        br_odom2map_->sendTransform(transform);
+        if (publish_tf_)
+            br_odom2map_->sendTransform(transform);
 
         localization_3d_confidence_.data = loc_fitness_;
         pub_localization_3d_confidence_->publish(localization_3d_confidence_);
