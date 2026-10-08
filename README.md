@@ -1,3 +1,25 @@
+> ## About this fork (branch `g1`)
+>
+> A personal fork of [deepglint/FAST_LIO_LOCALIZATION_HUMANOID](https://github.com/deepglint/FAST_LIO_LOCALIZATION_HUMANOID) (upstream `humble` at `df4772e`), used by
+> a Unitree G1 humanoid project (simulation + robot). The upstream README follows unchanged below. Changes on `g1`:
+>
+> **FAST_LIO**
+> - The Livox driver is optional (`FAST_LIO_WITH_LIVOX`, off by default; no `livox_ros_driver2` dependency), so it
+>   builds with any `sensor_msgs/PointCloud2` lidar (e.g. a simulator).
+> - The map is saved on shutdown again (`pcl_wait_save` had been commented out); small preprocess / CMake fixes.
+>
+> **open3d_loc**
+> - `publish_tf` (default `true`): `false` = no map→odom / map→motion_link TF, for setups where another node owns
+>   map→odom.
+> - `odom2map_smoothing` (default `0.0` = off, as upstream): the published map→odom glides toward each new
+>   registration result instead of jumping every 1/`loc_frequence` s (0.1 → largest TF step 21 → 5 mm in our tests);
+>   jumps > 1 m (re-localisation) are taken at once.
+> - Robustness: an empty `initialpose` and missing mount frames (`imu_link`, `motion_link`) fall back to identity
+>   instead of crashing (now a warning, not an error); tf2 `.h` headers (Humble + Foxy); no `pcl_ros` dependency;
+>   `Open3D_DIR` from `$HOME/open3d_install` if present, else the system Open3D.
+>
+> Robot / sim launch files and parameters are not in this fork; they live in the project that uses it.
+
 ## 📢 Updates
 
 - 🎉 **2025-12-01** : ROS2 (Humble) version already supports this , please check the Humble branch.
