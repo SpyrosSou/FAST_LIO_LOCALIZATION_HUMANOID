@@ -1082,7 +1082,11 @@ void GloabalLocalization::CallbackInitialPose(const geometry_msgs::msg::PoseWith
               << mat_odom2map_ << std::endl;
     std::cout << "confidence_loc_th_: " << confidence_loc_th_ << " current confidence: " << loc_fitness_ << std::endl;
 
-    if (!(loc_initialized_ && loc_fitness_ > 0.99))
+    // Always take it: /initialpose is an explicit command (RViz "2D Pose Estimate", amcl_initial_pose). Upstream
+    // ignored it once the fit was > 0.99, but in a near-symmetric room it can be that sure of a wrong pose — the
+    // user's RViz estimate was then dropped (test N3, 2026-10-09).
+    if (loc_initialized_ && loc_fitness_ > 0.99)
+        RCLCPP_WARN(this->get_logger(), "/initialpose while confident (fitness %.3f) — using it anyway", loc_fitness_);
     {
         std::cout << "initpose:x y z, x y z w\n"
                   << initialpose->pose.pose.position.x << " "
